@@ -56,6 +56,7 @@
 #include "chrome/browser/content_settings/cookie_settings_factory.h"
 #include "chrome/browser/extensions/chrome_content_browser_client_extensions_part.h"
 #include "chrome/browser/net/profile_network_context_service.h"
+#include "chrome/browser/hid/chrome_hid_delegate.h"
 #include "chrome/browser/net/profile_network_context_service_factory.h"
 #include "chrome/browser/net/system_network_context_manager.h"
 #include "chrome/browser/pdf/chrome_pdf_stream_delegate.h"
@@ -482,6 +483,15 @@ bool AlloyContentBrowserClient::IsHandledURL(const GURL& url) {
   }
 
   return CefAppManager::Get()->HasCustomScheme(scheme);
+}
+
+// ribbon / Distant
+content::HidDelegate*
+AlloyContentBrowserClient::GetHidDelegate()
+{
+  if (!hid_delegate_)
+    hid_delegate_ = std::make_unique<ChromeHidDelegate>();
+  return hid_delegate_.get();
 }
 
 void AlloyContentBrowserClient::SiteInstanceGotProcess(

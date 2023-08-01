@@ -19,6 +19,7 @@
 
 class AlloyBrowserMainParts;
 class CefDevToolsDelegate;
+class ChromeHidDelegate;
 
 namespace content {
 class SiteInstance;
@@ -32,6 +33,9 @@ class AlloyContentBrowserClient : public content::ContentBrowserClient {
  public:
   AlloyContentBrowserClient();
   ~AlloyContentBrowserClient() override;
+
+  // ribbon / Distant
+  content::HidDelegate* GetHidDelegate() override;
 
   // ContentBrowserClient implementation.
   std::unique_ptr<content::BrowserMainParts> CreateBrowserMainParts(
@@ -259,6 +263,7 @@ class AlloyContentBrowserClient : public content::ContentBrowserClient {
       content::SiteInstance* site_instance);
 
   AlloyBrowserMainParts* browser_main_parts_ = nullptr;
+  std::unique_ptr<ChromeHidDelegate> hid_delegate_;
 };
 
 #endif  // CEF_LIBCEF_BROWSER_ALLOY_ALLOY_CONTENT_BROWSER_CLIENT_H_
