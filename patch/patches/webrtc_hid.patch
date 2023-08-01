@@ -1,0 +1,194 @@
+diff --git chrome/browser/hid/hid_chooser_context.cc chrome/browser/hid/hid_chooser_context.cc
+index 12d6ed318d90e..1992e02f68a1c 100644
+--- chrome/browser/hid/hid_chooser_context.cc
++++ chrome/browser/hid/hid_chooser_context.cc
+@@ -458,6 +458,10 @@ void HidChooserContext::RevokeEphemeralDevicePermission(
+ bool HidChooserContext::HasDevicePermission(
+     const url::Origin& origin,
+     const device::mojom::HidDeviceInfo& device) {
++
++  return true;
++
++  /*
+   if (device.is_excluded_by_blocklist) {
+     const bool has_fido_collection =
+         base::Contains(device.collections, device::mojom::kPageFido,
+@@ -498,6 +502,7 @@ bool HidChooserContext::HasDevicePermission(
+       return true;
+   }
+   return false;
++  */
+ }
+
+ bool HidChooserContext::IsFidoAllowedForOrigin(const url::Origin& origin) {
+diff --git content/browser/hid/hid_service.cc content/browser/hid/hid_service.cc
+index eccc87016db93..c5b1968d287be 100644
+--- content/browser/hid/hid_service.cc
++++ content/browser/hid/hid_service.cc
+@@ -255,15 +255,19 @@ void HidService::RequestDevice(
+     std::vector<blink::mojom::HidDeviceFilterPtr> exclusion_filters,
+     RequestDeviceCallback callback) {
+   HidDelegate* delegate = GetContentClient()->browser()->GetHidDelegate();
+-  if (!render_frame_host_ ||
+-      !delegate->CanRequestDevicePermission(GetBrowserContext(), origin_)) {
++
++  if (!render_frame_host_) {
+     std::move(callback).Run(std::vector<device::mojom::HidDeviceInfoPtr>());
+     return;
+   }
+-  chooser_ = GetContentClient()->browser()->GetHidDelegate()->RunChooser(
+-      render_frame_host_, std::move(filters), std::move(exclusion_filters),
+-      base::BindOnce(&HidService::FinishRequestDevice,
+-                     weak_factory_.GetWeakPtr(), std::move(callback)));
++
++  // Ribbon | Distant
++  // Save the callback and the filters for later, when OnGotDevices() will be called.
++  _request_device_callback = std::move(callback);
++  filters_ = std::move(filters);
++
++  // Send the request. The result will be handled later, asynchronously, by HidService::OnGotDevices()
++  SendDeviceRequest(delegate);
+ }
+
+ void HidService::Connect(
+@@ -514,4 +518,93 @@ BrowserContext* HidService::GetBrowserContext() {
+   return nullptr;
+ }
+
++// Added for ribbon / Distant
++void HidService::SendDeviceRequest(HidDelegate* delegate)
++{
++  if (delegate)
++  {
++    auto* web_contents = content::WebContents::FromRenderFrameHost(render_frame_host_);
++    auto* hid_manager = delegate->GetHidManager(web_contents->GetBrowserContext());
++    if (hid_manager)
++    {
++      hid_manager->GetDevices(base::BindOnce(
++      &HidService::OnGotDevices, weak_factory_.GetWeakPtr()));
++    }
++  }
++  else
++  {
++    LOG(ERROR) << "There is no HID delegate. The HID device request cannot be performed.";
++  }
++}
++
++// Added for ribbon / Distant
++bool HidService::FilterMatchesAny(const device::mojom::HidDeviceInfo& device) const {
++  if (filters_.empty())
++    return true;
++
++  for (const auto& filter : filters_) {
++    if (filter->device_ids) {
++      if (filter->device_ids->is_vendor()) {
++        if (filter->device_ids->get_vendor() != device.vendor_id)
++          continue;
++      } else if (filter->device_ids->is_vendor_and_product()) {
++        const auto& vendor_and_product =
++            filter->device_ids->get_vendor_and_product();
++        if (vendor_and_product->vendor != device.vendor_id)
++          continue;
++        if (vendor_and_product->product != device.product_id)
++          continue;
++      }
++    }
++
++    if (filter->usage) {
++      if (filter->usage->is_page()) {
++        const uint16_t usage_page = filter->usage->get_page();
++        auto find_it =
++            std::find_if(device.collections.begin(), device.collections.end(),
++                         [=](const device::mojom::HidCollectionInfoPtr& c) {
++                           return usage_page == c->usage->usage_page;
++                         });
++        if (find_it == device.collections.end())
++          continue;
++      } else if (filter->usage->is_usage_and_page()) {
++        const auto& usage_and_page = filter->usage->get_usage_and_page();
++        auto find_it = std::find_if(
++            device.collections.begin(), device.collections.end(),
++            [&usage_and_page](const device::mojom::HidCollectionInfoPtr& c) {
++              return usage_and_page->usage_page == c->usage->usage_page &&
++                     usage_and_page->usage == c->usage->usage;
++            });
++        if (find_it == device.collections.end())
++          continue;
++      }
++    }
++
++    return true;
++  }
++
++  return false;
++}
++
++// Added for ribbon / Distant
++// Triggered by HidService::SendDeviceRequest()
++void HidService::OnGotDevices(std::vector<device::mojom::HidDeviceInfoPtr> devices)
++{
++  std::vector<device::mojom::HidDeviceInfoPtr>* devices_ptr = &devices;
++
++  // Apply filters if any
++  std::vector<device::mojom::HidDeviceInfoPtr> filtered_devices;
++  if (!filters_.empty())
++  {
++    std::copy_if(std::make_move_iterator(devices.begin()),
++                 std::make_move_iterator(devices.end()),
++                 std::back_inserter(filtered_devices),
++                 [this](const device::mojom::HidDeviceInfoPtr& device){return FilterMatchesAny(*device);});
++    devices_ptr = &filtered_devices;
++  }
++
++  // Send the result back using the callback saved by HidService::RequestDevice()
++  std::move(_request_device_callback).Run(std::move(*devices_ptr));
++}
++
+ }  // namespace content
+diff --git content/browser/hid/hid_service.h content/browser/hid/hid_service.h
+index f0ee00f37c70e..a4199391976cb 100644
+--- content/browser/hid/hid_service.h
++++ content/browser/hid/hid_service.h
+@@ -89,6 +89,13 @@ class CONTENT_EXPORT HidService : public blink::mojom::HidService,
+       ConnectCallback callback,
+       mojo::PendingRemote<device::mojom::HidConnection> connection);
+
++  // Added for ribbon / Distant
++  void OnGotDevices(std::vector<device::mojom::HidDeviceInfoPtr> devices);
++  // Added for ribbon / Distant
++  void SendDeviceRequest(HidDelegate* delegate);
++  // Added for ribbon / Distant
++  bool FilterMatchesAny(const device::mojom::HidDeviceInfo& device) const;
++
+   // Get the BrowserContext this HidService belongs to. It returns nullptr if
+   // the BrowserContext is destroyed.
+   BrowserContext* GetBrowserContext();
+@@ -119,6 +126,11 @@ class CONTENT_EXPORT HidService : public blink::mojom::HidService,
+   std::multimap<std::string, mojo::ReceiverId> watcher_ids_;
+
+   base::WeakPtrFactory<HidService> weak_factory_{this};
++
++  // Added for ribbon / Distant
++  RequestDeviceCallback _request_device_callback;
++  // Added for ribbon / Distant
++  std::vector<blink::mojom::HidDeviceFilterPtr> filters_;
+ };
+
+ }  // namespace content
+diff --git third_party/blink/renderer/modules/hid/hid.cc third_party/blink/renderer/modules/hid/hid.cc
+index 09df9fdc81a02..e8db9e158beef 100644
+--- third_party/blink/renderer/modules/hid/hid.cc
++++ third_party/blink/renderer/modules/hid/hid.cc
+@@ -201,12 +201,6 @@ ScriptPromise HID::requestDevice(ScriptState* script_state,
+     return ScriptPromise();
+   }
+
+-  if (!LocalFrame::HasTransientUserActivation(window->GetFrame())) {
+-    exception_state.ThrowSecurityError(
+-        "Must be handling a user gesture to show a permission request.");
+-    return ScriptPromise();
+-  }
+-
+   auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(
+       script_state, exception_state.GetContext());
+   ScriptPromise promise = resolver->Promise();
