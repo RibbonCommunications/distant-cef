@@ -63,6 +63,7 @@
 #include "chrome/browser/profiles/renderer_updater_factory.h"
 #include "chrome/browser/renderer_host/pepper/chrome_browser_pepper_host_factory.h"
 #include "chrome/browser/spellchecker/spell_check_host_chrome_impl.h"
+#include "chrome/browser/hid/chrome_hid_delegate.h"
 #include "chrome/common/chrome_content_client.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
@@ -489,6 +490,15 @@ AlloyContentBrowserClient::AlloyContentBrowserClient() {
 }
 
 AlloyContentBrowserClient::~AlloyContentBrowserClient() {}
+
+// Kandy
+content::HidDelegate*
+AlloyContentBrowserClient::GetHidDelegate()
+{
+  if (!hid_delegate_)
+    hid_delegate_ = std::make_unique<ChromeHidDelegate>();
+  return hid_delegate_.get();
+}
 
 std::unique_ptr<content::BrowserMainParts>
 AlloyContentBrowserClient::CreateBrowserMainParts(

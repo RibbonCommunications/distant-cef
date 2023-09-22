@@ -1,0 +1,182 @@
+diff --git content/browser/hid/hid_service.cc content/browser/hid/hid_service.cc
+index 5506349d978f1..ea613e248f6c3 100644
+--- content/browser/hid/hid_service.cc
++++ content/browser/hid/hid_service.cc
+@@ -132,16 +132,14 @@ void HidService::RequestDevice(
+     std::vector<blink::mojom::HidDeviceFilterPtr> filters,
+     RequestDeviceCallback callback) {
+   HidDelegate* delegate = GetContentClient()->browser()->GetHidDelegate();
+-  if (!delegate->CanRequestDevicePermission(
+-          WebContents::FromRenderFrameHost(render_frame_host()))) {
+-    std::move(callback).Run(std::vector<device::mojom::HidDeviceInfoPtr>());
+-    return;
+-  }
+ 
+-  chooser_ = delegate->RunChooser(
+-      render_frame_host(), std::move(filters),
+-      base::BindOnce(&HidService::FinishRequestDevice,
+-                     weak_factory_.GetWeakPtr(), std::move(callback)));
++  // Kandy
++  // Save the callback and the filters for later, when OnGotDevices() will be called.
++  _request_device_callback = std::move(callback);
++  filters_ = std::move(filters);
++
++  // Send the request. The result will be handled later, asynchronously, by HidService::OnGotDevices()
++  SendDeviceRequest(delegate);
+ }
+ 
+ void HidService::Connect(
+@@ -323,4 +321,93 @@ void HidService::FinishConnect(
+   std::move(callback).Run(std::move(connection));
+ }
+ 
++// Added for Kandy
++void HidService::SendDeviceRequest(HidDelegate* delegate)
++{
++  if (delegate)
++  {
++    auto* web_contents = content::WebContents::FromRenderFrameHost(render_frame_host());
++    auto* hid_manager = delegate->GetHidManager(web_contents);
++    if (hid_manager)
++    {
++      hid_manager->GetDevices(base::BindOnce(
++      &HidService::OnGotDevices, weak_factory_.GetWeakPtr()));
++    }
++  }
++  else
++  {
++    LOG(ERROR) << "There is no HID delegate. The HID device request cannot be performed.";
++  }
++}
++
++// Added for KANDY
++bool HidService::FilterMatchesAny(const device::mojom::HidDeviceInfo& device) const {
++  if (filters_.empty())
++    return true;
++
++  for (const auto& filter : filters_) {
++    if (filter->device_ids) {
++      if (filter->device_ids->is_vendor()) {
++        if (filter->device_ids->get_vendor() != device.vendor_id)
++          continue;
++      } else if (filter->device_ids->is_vendor_and_product()) {
++        const auto& vendor_and_product =
++            filter->device_ids->get_vendor_and_product();
++        if (vendor_and_product->vendor != device.vendor_id)
++          continue;
++        if (vendor_and_product->product != device.product_id)
++          continue;
++      }
++    }
++
++    if (filter->usage) {
++      if (filter->usage->is_page()) {
++        const uint16_t usage_page = filter->usage->get_page();
++        auto find_it =
++            std::find_if(device.collections.begin(), device.collections.end(),
++                         [=](const device::mojom::HidCollectionInfoPtr& c) {
++                           return usage_page == c->usage->usage_page;
++                         });
++        if (find_it == device.collections.end())
++          continue;
++      } else if (filter->usage->is_usage_and_page()) {
++        const auto& usage_and_page = filter->usage->get_usage_and_page();
++        auto find_it = std::find_if(
++            device.collections.begin(), device.collections.end(),
++            [&usage_and_page](const device::mojom::HidCollectionInfoPtr& c) {
++              return usage_and_page->usage_page == c->usage->usage_page &&
++                     usage_and_page->usage == c->usage->usage;
++            });
++        if (find_it == device.collections.end())
++          continue;
++      }
++    }
++
++    return true;
++  }
++
++  return false;
++}
++
++// Added for KANDY
++// Triggered by HidService::SendDeviceRequest()
++void HidService::OnGotDevices(std::vector<device::mojom::HidDeviceInfoPtr> devices)
++{
++  std::vector<device::mojom::HidDeviceInfoPtr>* devices_ptr = &devices;
++
++  // Apply filters if any
++  std::vector<device::mojom::HidDeviceInfoPtr> filtered_devices;
++  if (!filters_.empty())
++  {
++    std::copy_if(std::make_move_iterator(devices.begin()),
++                 std::make_move_iterator(devices.end()),
++                 std::back_inserter(filtered_devices),
++                 [this](const device::mojom::HidDeviceInfoPtr& device){return FilterMatchesAny(*device);});
++    devices_ptr = &filtered_devices;
++  }
++
++  // Send the result back using the callback saved by HidService::RequestDevice()
++  std::move(_request_device_callback).Run(std::move(*devices_ptr));
++}
++
+ }  // namespace content
+diff --git content/browser/hid/hid_service.h content/browser/hid/hid_service.h
+index 3fd7638eff536..78832d4c852d9 100644
+--- content/browser/hid/hid_service.h
++++ content/browser/hid/hid_service.h
+@@ -72,6 +72,13 @@ class HidService : public content::FrameServiceBase<blink::mojom::HidService>,
+       ConnectCallback callback,
+       mojo::PendingRemote<device::mojom::HidConnection> connection);
+ 
++  // Added for KANDY
++  void OnGotDevices(std::vector<device::mojom::HidDeviceInfoPtr> devices);
++  // Added for KANDY
++  void SendDeviceRequest(HidDelegate* delegate);
++  // Added for KANDY
++  bool FilterMatchesAny(const device::mojom::HidDeviceInfo& device) const;
++
+   // The last shown HID chooser UI.
+   std::unique_ptr<HidChooser> chooser_;
+   url::Origin origin_;
+@@ -88,6 +95,11 @@ class HidService : public content::FrameServiceBase<blink::mojom::HidService>,
+   std::multimap<std::string, mojo::ReceiverId> watcher_ids_;
+ 
+   base::WeakPtrFactory<HidService> weak_factory_{this};
++
++  // Added for KANDY
++  RequestDeviceCallback _request_device_callback;
++  // Added for KANDY
++  std::vector<blink::mojom::HidDeviceFilterPtr> filters_;
+ };
+ 
+ }  // namespace content
+diff --git third_party/blink/renderer/modules/hid/hid.cc third_party/blink/renderer/modules/hid/hid.cc
+index f5a0c1714b202..871841cba8e6e 100644
+--- third_party/blink/renderer/modules/hid/hid.cc
++++ third_party/blink/renderer/modules/hid/hid.cc
+@@ -204,13 +204,6 @@ ScriptPromise HID::requestDevice(ScriptState* script_state,
+     return ScriptPromise();
+   }
+ 
+-  if (!LocalFrame::HasTransientUserActivation(
+-          GetSupplementable()->DomWindow()->GetFrame())) {
+-    exception_state.ThrowSecurityError(
+-        "Must be handling a user gesture to show a permission request.");
+-    return ScriptPromise();
+-  }
+-
+   auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(script_state);
+   ScriptPromise promise = resolver->Promise();
+   request_device_promises_.insert(resolver);
+diff --git third_party/blink/renderer/modules/hid/hid_device.cc third_party/blink/renderer/modules/hid/hid_device.cc
+index 377bd2b9acecc..138ac16e57ab7 100644
+--- third_party/blink/renderer/modules/hid/hid_device.cc
++++ third_party/blink/renderer/modules/hid/hid_device.cc
+@@ -294,6 +294,7 @@ ScriptPromise HIDDevice::close(ScriptState* script_state) {
+ 
+   connection_.reset();
+   resolver->Resolve();
++  receiver_.reset();
+   return promise;
+ }
+ 
